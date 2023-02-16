@@ -31,6 +31,7 @@ import struct
 import time
 
 from micropython import const
+from enum import IntEnum
 
 try:
     from typing import Tuple
@@ -60,6 +61,26 @@ _REGISTER_CMD = const(0x7E)
 _OSR_SETTINGS = (1, 2, 4, 8, 16, 32)  # pressure and temperature oversampling settings
 _IIR_SETTINGS = (0, 2, 4, 8, 16, 32, 64, 128)  # IIR filter coefficients
 
+class PowerMode(IntEnum):
+    """ The available power modes of the chip.
+    Sleep: No measurements are performed
+    Forced: Single measurement made on request
+    Normal: Continuous measurements
+    """
+
+    sleep = 0x00
+    forced = 0x10
+    normal = 0x30
+
+class ODRMode(IntEnum):
+    """ The available output data rates of the chip.
+    These are just a few of many rates, the fastest of whats mentioned on the datasheet.
+    Anything higher than ODR_25 doesn't seem to work, current limited on the RP3 maybe?
+    """
+    ODR_200 = 0
+    ODR_100 = 1
+    ODR_50 = 2
+    ODR_25 = 3
 
 class BMP3XX:
     """Base class for BMP3XX sensor."""
@@ -71,6 +92,11 @@ class BMP3XX:
         self._read_coefficients()
         self.reset()
         self.sea_level_pressure = 1013.25
+
+        #Default modes set to normal power and 25 Hz ODR
+        self.power_mode = PowerMode.normal
+        self.output_data_rate = ODRMode.ODR_25 
+        
         self._wait_time = 0.002  # change this value to have faster reads if needed
         """Sea level pressure in hPa."""
 
@@ -89,6 +115,27 @@ class BMP3XX:
         """The altitude in meters based on the currently set sea level pressure."""
         # see https://www.weather.gov/media/epz/wxcalc/pressureAltitude.pdf
         return 44307.7 * (1 - (self.pressure / self.sea_level_pressure) ** 0.190284)
+    
+    @property
+    def output_data_rate(self):
+        return self._read_byte(_REGISTER_ODR)
+
+    @output_data_rate.setter
+    def output_data_rate(self, odr) -> None:
+        if not isinstance(odr, ODRMode):
+            raise ValueError("Power mode value not valid.")
+        self._write_register_byte(_REGISTER_ODR, odr)
+    
+    @property
+    def power_mode(self):
+        return self._power_mode
+
+    @power_mode.setter
+    def power_mode(self, power_mode) -> None:
+        if not isinstance(power_mode, PowerMode):
+            raise ValueError("Power mode value not valid.")
+        self._power_mode = power_mode
+        self._write_register_byte(_REGISTER_CONTROL, power_mode | 0x03)
 
     @property
     def pressure_oversampling(self) -> int:
@@ -140,14 +187,18 @@ class BMP3XX:
         # OK, pylint. This one is all kinds of stuff you shouldn't worry about.
         # pylint: disable=invalid-name, too-many-locals
 
-        # Perform one measurement in forced mode
-        self._write_register_byte(_REGISTER_CONTROL, 0x13)
-
         # Wait for *both* conversions to complete
-        while self._read_byte(_REGISTER_STATUS) & 0x60 != 0x60:
-            time.sleep(self._wait_time)
-
+        # Perform one measurement in forced mode
+        # Wait for *both* conversions to complete
         # Get ADC values
+        if self._power_mode == PowerMode.forced:
+            # Perform one measurement in forced mode
+            self._write_register_byte(_REGISTER_CONTROL, 0x13)
+
+            # Wait for *both* conversions to complete
+            while self._read_byte(_REGISTER_STATUS) & 0x60 != 0x60:
+                time.sleep(self._wait_time)
+                
         data = self._read_register(_REGISTER_PRESSUREDATA, 6)
         adc_p = data[2] << 16 | data[1] << 8 | data[0]
         adc_t = data[5] << 16 | data[4] << 8 | data[3]
